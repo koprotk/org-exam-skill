@@ -1,0 +1,70 @@
+#+TITLE: Sample Exam
+#+AUTHOR: Professor Name
+#+DATE: Fall 2026
+#+LATEX_CLASS: exam
+#+LATEX_CLASS_OPTIONS: answers
+#+LANGUAGE: en
+#+EXAM_HEADER_LEFT: CS 101
+#+EXAM_HEADER_CENTER: Sample Exam
+#+EXAM_HEADER_RIGHT: Fall 2026
+#+EXAM_FOOTER_RIGHT: \thepage/\numpages
+
+Instructions: answer every question.  You have 90 minutes.
+
+* Question 1 [10 pts]
+
+Compute the derivative of $f(x) = x^2 + 3x + 2$.
+
+** Part a [4 pts]
+
+Find $f'(x)$.
+
+** Part b [6 pts]
+
+Evaluate $f'(2)$.
+
+*** Subpart i [3 pts]
+
+State the power rule.
+
+*** Subpart ii [3 pts]
+
+Check your result by expanding first.
+
+* Question 2 [15 pts]
+
+What is the capital of France?
+
+- London
+- Berlin
+- @correct Paris
+- Madrid
+
+** Part a [5 pts]
+
+Explain your choice in one sentence.
+
+** Part b [10 pts]
+
+Which of the following are prime numbers?
+
++ @correct 2
++ @correct 3
++ 4
++ @correct 5
+
+* Question 3
+:PROPERTIES:
+:POINTS: 5
+:END:
+
+Points can be set with a property drawer when the title gets crowded.  This
+question is worth 5 points.
+
+* Question 4 [10 pts]
+
+What is $2 + 2$?
+
+:solution:
+4, because addition is well-defined over the integers.
+:end:

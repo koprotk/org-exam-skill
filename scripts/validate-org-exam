@@ -1,0 +1,225 @@
+#!/usr/bin/env -S emacs --script
+;; -*- lexical-binding: t; -*-
+;; validate-org-exam — lint Org files for the org-exam export backend.
+;;
+;; Usage:
+;;   validate-org-exam [--org-exam-path DIR] [--export] FILE.org ...
+;;
+;; Structural and style checks run without org-exam installed (they only need
+;; built-in Org).  The --export flag additionally loads org-exam and runs a
+;; full export to a .tex file as a smoke test; it requires the org-exam
+;; directory (set ORG_EXAM_PATH or pass --org-exam-path DIR).
+;;
+;; Exit status: 0 on success (warnings allowed), 1 if any error was found.
+
+(require 'cl-lib)
+(require 'org)
+(require 'org-element)
+
+(defvar oe--files '())
+(defvar oe--org-exam-path
+  (or (getenv "ORG_EXAM_PATH")
+      (expand-file-name "~/Projects/personal/org-exam")))
+(defvar oe--export nil)
+(defvar oe--had-error nil)
+(defvar oe--had-warning nil)
+
+(defun oe--usage ()
+  (princ "Usage: validate-org-exam [--org-exam-path DIR] [--export] FILE.org ...\n")
+  (kill-emacs 2))
+
+(defun oe--parse-args ()
+  (while argv
+    (let ((arg (pop argv)))
+      (cond
+       ((or (string= arg "-h") (string= arg "--help")) (oe--usage))
+       ((string= arg "--export") (setq oe--export t))
+       ((string= arg "--org-exam-path")
+        (if argv (setq oe--org-exam-path (pop argv)) (oe--usage)))
+       ((string-prefix-p "--org-exam-path=" arg)
+        (setq oe--org-exam-path (substring arg (length "--org-exam-path="))))
+       ((string-prefix-p "-" arg)
+        (princ (format "Unknown option: %s\n" arg))
+        (oe--usage))
+       (t (push arg oe--files)))))
+  (setq oe--files (nreverse oe--files))
+  (unless oe--files
+    (princ "No input files.\n")
+    (oe--usage)))
+
+(defun oe--line (pos)
+  (line-number-at-pos pos))
+
+(defun oe--error (file pos msg)
+  (setq oe--had-error t)
+  (princ (format "%s:%d: ERROR: %s\n" file (oe--line pos) msg)))
+
+(defun oe--warn (file pos msg)
+  (setq oe--had-warning t)
+  (princ (format "%s:%d: WARN: %s\n" file (oe--line pos) msg)))
+
+;;; Checks
+
+(defun oe--check-preamble (file tree)
+  (let ((class (org-element-map tree 'keyword
+                 (lambda (k)
+                   (when (string= (org-element-property :key k) "LATEX_CLASS")
+                     (org-element-property :value k)))
+                 nil t)))
+    (unless (and class
+                 (string-match-p "\\`[[:space:]]*exam[[:space:]]*\\'" (or class "")))
+      (oe--warn file 1
+                "missing or wrong `#+LATEX_CLASS: exam' (required for the LaTeX exam document class)"))))
+
+(defun oe--has-answers-option (tree)
+  (let ((opts (org-element-map tree 'keyword
+                (lambda (k)
+                  (when (string= (org-element-property :key k) "LATEX_CLASS_OPTIONS")
+                    (org-element-property :value k)))
+                nil t)))
+    (and opts (string-match-p "answers" (or opts "")))))
+
+(defun oe--check-structure (file tree)
+  (let ((stack '()))
+    (dolist (h (org-element-map tree 'headline #'identity))
+      (let* ((level (org-element-property :level h))
+             (raw (or (org-element-property :raw-value h) ""))
+             (begin (org-element-property :begin h)))
+        (while (and stack (>= (car stack) level))
+          (pop stack))
+        (let ((parent (or (car stack) 0)))
+          (cond
+           ((>= level 4)
+            (oe--error file begin
+              (format "headline `%s' at level %d is dropped by org-exam (only question/part/subpart are supported)"
+                      raw level)))
+           ((and (= level 2) (/= parent 1))
+            (oe--error file begin
+              (format "part `%s' must be nested directly under a question (`*')" raw)))
+           ((and (= level 3) (/= parent 2))
+            (oe--error file begin
+              (format "subpart `%s' must be nested directly under a part (`**')" raw)))))
+        (push level stack)))))
+
+(defun oe--check-points (file tree)
+  (dolist (h (org-element-map tree 'headline #'identity))
+    (let* ((raw (or (org-element-property :raw-value h) ""))
+           (begin (org-element-property :begin h))
+           (points-prop (org-element-property :POINTS h)))
+      (when (and points-prop
+                 (not (string-match-p "\\`[[:space:]]*[0-9.]+[[:space:]]*\\'" points-prop)))
+        (oe--warn file begin
+          (format ":POINTS: value `%s' is not numeric; points will be ignored" points-prop)))
+      (when (string-match "\\[\\([^]]*\\)[[:space:]]*\\(pts?\\|points?\\)\\]" raw)
+        (let ((val (match-string 1 raw)))
+          (unless (string-match-p "\\`[[:space:]]*[0-9.]+[[:space:]]*\\'" val)
+            (oe--warn file begin
+              (format "point bracket `[%s pts]' is not numeric; org-exam will not extract it" (org-trim val)))))))))
+
+(defun oe--item-text (item)
+  (let ((p (cl-find-if (lambda (e) (eq (org-element-type e) 'paragraph))
+                       (org-element-contents item))))
+    (when p
+      (org-trim (buffer-substring-no-properties
+                 (org-element-property :contents-begin p)
+                 (org-element-property :contents-end p))))))
+
+(defun oe--check-correct-marker (file tree)
+  (let ((item-regions '()))
+    (dolist (plist (org-element-map tree 'plain-list #'identity))
+      (let ((type (org-element-property :type plist)))
+        (dolist (item (org-element-map plist 'item #'identity))
+          (let* ((begin (org-element-property :begin item))
+                 (bullet (or (org-element-property :bullet item) ""))
+                 (is-choice-list (and (eq type 'unordered) (string-prefix-p "-" bullet)))
+                 (is-checkbox-list (and (eq type 'unordered) (string-prefix-p "+" bullet)))
+                 (text (oe--item-text item)))
+            (when (or is-choice-list is-checkbox-list)
+              (push (cons begin (org-element-property :end item)) item-regions))
+            (when (and text (string-match-p "@correct" text))
+              (cond
+               ((not (or is-choice-list is-checkbox-list))
+                (oe--warn file begin
+                  "@correct only works in `-' (choices) or `+' (checkboxes) list items"))
+               ((not (string-match-p "\\`[[:space:]]*@correct\\([[:space:]]\\|\\'\\)" text))
+                (oe--warn file begin
+                  "@correct must be at the very start of the item to be recognized"))))))))
+    ;; Any `@correct' outside a choice/checkbox item has no effect.
+    (goto-char (point-min))
+    (while (re-search-forward "@correct" nil t)
+      (let ((pos (match-beginning 0)))
+        (unless (cl-find-if (lambda (r) (and (>= pos (car r)) (< pos (cdr r))))
+                            item-regions)
+          (oe--warn file pos
+            "@correct appears outside a `-' (choices) or `+' (checkboxes) list item"))))))
+
+(defun oe--check-solutions (file tree)
+  (let ((has-solution
+         (org-element-map tree 'drawer
+           (lambda (d)
+             (string-match-p "\\`solution\\'" (downcase (or (org-element-property :drawer-name d) ""))))
+           nil t)))
+    (when (and has-solution (not (oe--has-answers-option tree)))
+      (oe--warn file 1
+        "solution drawers present but `#+LATEX_CLASS_OPTIONS: answers' is not set; solutions will be hidden"))))
+
+(defun oe--validate-file (file)
+  (unless (file-exists-p file)
+    (princ (format "%s: ERROR: file not found\n" file))
+    (setq oe--had-error t)
+    (cl-return-from oe--validate-file))
+  (condition-case err
+      (with-temp-buffer
+        (insert-file-contents file)
+        (delay-mode-hooks (org-mode))
+        (let ((tree (org-element-parse-buffer)))
+          (oe--check-preamble file tree)
+          (oe--check-structure file tree)
+          (oe--check-points file tree)
+          (oe--check-correct-marker file tree)
+          (oe--check-solutions file tree)))
+    (error
+     (princ (format "%s: ERROR: could not parse: %s\n" file (error-message-string err)))
+     (setq oe--had-error t))))
+
+(defun oe--load-org-exam ()
+  (unless (file-exists-p oe--org-exam-path)
+    (princ (format "ERROR: org-exam not found at %s (set ORG_EXAM_PATH or pass --org-exam-path DIR)\n"
+                   oe--org-exam-path))
+    (kill-emacs 2))
+  (add-to-list 'load-path (file-name-as-directory oe--org-exam-path))
+  (require 'org-exam))
+
+(defun oe--export-file (file)
+  (condition-case err
+      (with-temp-buffer
+        (insert-file-contents file)
+        (delay-mode-hooks (org-mode))
+        (let ((outfile (concat (file-name-sans-extension file) ".tex")))
+          (org-export-to-file 'exam outfile)
+          (princ (format "%s: exported to %s\n" file outfile))))
+    (error
+     (princ (format "%s: ERROR: export failed: %s\n" file (error-message-string err)))
+     (setq oe--had-error t))))
+
+;;; Main
+
+(oe--parse-args)
+(when oe--export
+  (oe--load-org-exam))
+
+(dolist (file oe--files)
+  (oe--validate-file file)
+  (when oe--export
+    (oe--export-file file)))
+
+(princ (format "checked %d file(s): %s\n"
+               (length oe--files)
+               (cond
+                (oe--had-error "errors found")
+                (oe--had-warning "warnings only")
+                (t "ok"))))
+
+(kill-emacs (if oe--had-error 1 0))
+
+;;; validate-org-exam ends here
